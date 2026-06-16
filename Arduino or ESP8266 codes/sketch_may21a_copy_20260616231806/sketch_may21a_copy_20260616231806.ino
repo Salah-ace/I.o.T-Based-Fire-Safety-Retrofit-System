@@ -1,145 +1,140 @@
-#define BLYNK_TEMPLATE_ID "" //add blynk template ID
+#define BLYNK_TEMPLATE_ID "TMPL2MH9WLR43"
 #define BLYNK_TEMPLATE_NAME "Fire Detection System"
-#define BLYNK_AUTH_TOKEN "" //add authentication token
+#define BLYNK_AUTH_TOKEN "tiMkKVNVP_VMLQVQBQB4EFT1WWMq6MfC"
 
 #include <ESP8266WiFi.h>
 #include <BlynkSimpleEsp8266.h>
 #include <DHT.h>
+#include <Wire.h>
 
-char ssid[] = "";  //Device name
-char pass[] = "";  // Device hotspot password
+// Wi-Fi Credentials
+char ssid[] = "Inf";
+char pass[] = "12131213";
 
-// Sensors & Outputs
-#define FLAME_SENSOR  4 //add 3 or 2
-#define SMOKE_SENSOR  12
-#define BUZZER        14
-#define PUMP          5
-#define DHTPIN        13
+// PCF8574 I2C Address
+#define PCF8574_ADDR 0x20
+
+// ESP8266 Pin Definitions
+#define FLAME_SENSOR  4   // GPIO4 (D2)
+#define SMOKE_SENSOR  12  // GPIO12 (D6)
+#define BUZZER        14  // GPIO14 (D5)
+#define PUMP_RELAY    5   // GPIO5 (D1)
+#define DHTPIN        13  // GPIO13 (D7)
 #define DHTTYPE       DHT11
 
-// Blynk Virtual Pins
-// V0 = Temperature
-// V1 = Humidity
-// V2 = Flame status
-// V3 = Smoke status
-// V4 = Pump status label
-// V5 = Silence buzzer button  <-- NEW
-// V6 = System status label    <-- NEW
+// PCF8574 Fan Control Pins
+#define FAN_INA 0
+#define FAN_INB 1
 
 DHT dht(DHTPIN, DHTTYPE);
 BlynkTimer timer;
 
 bool fireDetected    = false;
 bool smokeDetected   = false;
-bool buzzerSilenced  = false;  // NEW — tracks if user silenced the buzzer
+bool buzzerSilenced  = false;
 
-// ─────────────────────────────────────────────
-// Called when user taps the Silence button (V5)
-// ─────────────────────────────────────────────
+void setFan(bool state) {
+  Wire.beginTransmission(PCF8574_ADDR);
+  if (state) {
+    Wire.write((1 << FAN_INA) | (1 << FAN_INB));
+  } else {
+    Wire.write(0x00);
+  }
+  Wire.endTransmission();
+}
+
 BLYNK_WRITE(V5) {
   int buttonState = param.asInt();
-
   if (buttonState == 1) {
     buzzerSilenced = true;
-    digitalWrite(BUZZER, LOW);  // Stop buzzer immediately
+    digitalWrite(BUZZER, LOW);
     Blynk.virtualWrite(V6, "⚠️ Buzzer Silenced - Still Monitoring");
-    Serial.println("Buzzer silenced via Blynk app.");
   } else {
     buzzerSilenced = false;
-    Serial.println("Silence reset.");
   }
 }
 
-// ─────────────────────────────────────────────
-// Main sensor loop — runs every 2 seconds
-// ─────────────────────────────────────────────
 void sendSensorData() {
-
   int flame = digitalRead(FLAME_SENSOR);
   int smoke = digitalRead(SMOKE_SENSOR);
-
+  
   float temp = dht.readTemperature();
   float hum  = dht.readHumidity();
-
+  
   bool fireDetectedNow  = (flame == LOW);
   bool smokeDetectedNow = (smoke == LOW);
-
-  // Send sensor readings to Blynk
+  
+  // Send to Blynk
   Blynk.virtualWrite(V0, temp);
   Blynk.virtualWrite(V1, hum);
-  Blynk.virtualWrite(V2, fireDetectedNow  ? 1 : 0);
+  Blynk.virtualWrite(V2, fireDetectedNow ? 1 : 0);
   Blynk.virtualWrite(V3, smokeDetectedNow ? 1 : 0);
-
-  // ── BUZZER LOGIC ──────────────────────────
+  Blynk.virtualWrite(V7, smokeDetectedNow ? 1 : 0);
+  
+  // Buzzer Logic
   if (fireDetectedNow || smokeDetectedNow) {
     if (!buzzerSilenced) {
-      digitalWrite(BUZZER, HIGH);  // Sound buzzer only if not silenced
+      digitalWrite(BUZZER, HIGH);
     }
-    // If silenced, buzzer stays off but everything else still runs
   } else {
-    // All clear — reset buzzer and silence flag
     digitalWrite(BUZZER, LOW);
-
     if (buzzerSilenced) {
-      buzzerSilenced = false;             // Auto-reset silence for next event
-      Blynk.virtualWrite(V5, 0);         // Reset button in app
+      buzzerSilenced = false;
+      Blynk.virtualWrite(V5, 0);
     }
   }
-
-  // ── PUMP LOGIC (fire only) ─────────────────
+  
+  // Fan Logic (Smoke only OR Fire + Smoke)
+  if (smokeDetectedNow) {
+    setFan(true);
+  } else {
+    setFan(false);
+  }
+  
+  // Pump Logic (Fire only)
   if (fireDetectedNow) {
-    digitalWrite(PUMP, HIGH);
-    Blynk.virtualWrite(V4, "🔥 FIRE DETECTED - PUMP ON");
+    digitalWrite(PUMP_RELAY, HIGH);
+    Blynk.virtualWrite(V4, "🔥 FIRE DETECTED - SPRINKLER ON");
     Blynk.virtualWrite(V6, "🔥 FIRE ALARM ACTIVE");
-    Serial.println("FIRE DETECTED -> Buzzer ON, Pump ON");
-
-    if (!fireDetected) {  // Send notification only once per event
-      Blynk.logEvent("fire_alert", "🔥 Fire detected! Pump activated! Open app to silence buzzer.");
+    
+    if (!fireDetected) {
+      Blynk.logEvent("fire_alert", "🔥 Fire detected! Sprinkler activated!");
       fireDetected = true;
     }
-
   } else {
-    digitalWrite(PUMP, LOW);
+    digitalWrite(PUMP_RELAY, LOW);
     fireDetected = false;
-
+    
     if (smokeDetectedNow) {
-      Blynk.virtualWrite(V4, "💨 SMOKE DETECTED - PUMP OFF");
-      Blynk.virtualWrite(V6, buzzerSilenced ? "⚠️ Buzzer Silenced - Still Monitoring" : "💨 SMOKE ALARM ACTIVE");
-
-      if (!smokeDetected) {  // Send notification only once per smoke event
-        Blynk.logEvent("fire_alert", "💨 Smoke detected! Check your environment.");
+      Blynk.virtualWrite(V4, "💨 SMOKE DETECTED - SPRINKLER OFF");
+      Blynk.virtualWrite(V6, "💨 SMOKE ALARM - FAN ON");
+      
+      if (!smokeDetected) {
+        Blynk.logEvent("smoke_alert", "💨 Smoke detected! Fan activated.");
         smokeDetected = true;
       }
-
-      Serial.println("SMOKE DETECTED -> Buzzer ON, Pump OFF");
-
     } else {
-      // Fully clear
       smokeDetected = false;
-      Blynk.virtualWrite(V4, "✅ PUMP OFF");
-      Blynk.virtualWrite(V6, "✅ System Safe");
-      Serial.println("System Safe");
+      Blynk.virtualWrite(V4, "✅ SYSTEM SAFE");
+      Blynk.virtualWrite(V6, "✅ System Safe - Monitoring");
     }
   }
-
-  // Serial Monitor
-  Serial.print("Temp: ");     Serial.print(temp);
-  Serial.print(" C  Hum: ");  Serial.print(hum);
-  Serial.print(" %  Flame: "); Serial.print(flame);
-  Serial.print("  Smoke: ");  Serial.println(smoke);
 }
 
 void setup() {
   Serial.begin(9600);
-
+  
+  Wire.begin(4, 5);
+  
   pinMode(FLAME_SENSOR, INPUT_PULLUP);
   pinMode(SMOKE_SENSOR,  INPUT_PULLUP);
   pinMode(BUZZER,        OUTPUT);
-  pinMode(PUMP,          OUTPUT);
-
-  digitalWrite(BUZZER, LOW);
-  digitalWrite(PUMP,   LOW);
-
+  pinMode(PUMP_RELAY,    OUTPUT);
+  
+  digitalWrite(BUZZER,     LOW);
+  digitalWrite(PUMP_RELAY, LOW);
+  setFan(false);
+  
   dht.begin();
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
   timer.setInterval(2000L, sendSensorData);
